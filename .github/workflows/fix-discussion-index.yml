@@ -1,0 +1,58 @@
+name: 修复 Discussion 搜索索引
+
+on:
+  workflow_dispatch:  # 仅手动触发，不会自动跑
+
+jobs:
+  fix-index:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 批量触发 GitHub 重新索引
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          
+          echo "🔍 正在拉取所有 Open 状态的 Discussions..."
+          
+          # 分页获取（每页 100，自动翻页）
+          page=1
+          all_nums=""
+          while true; do
+            result=$(gh api "repos/$OWNER/$REPO/discussions?state=open&per_page=100&page=$page" --jq '.[].number' 2>/dev/null || true)
+            [ -z "$result" ] && break
+            all_nums="$all_nums"$'\n'"$result"
+            page=$((page + 1))
+          done
+          
+          nums=$(echo "$all_nums" | grep -v '^$' | sort -u)
+          total=$(echo "$nums" | wc -l)
+          echo "📊 共找到 $total 个 Discussion 需要修复"
+          
+          [ "$total" -eq 0 ] && echo "✅ 没有需要修复的" && exit 0
+          
+          count=0
+          while read -r num; do
+            count=$((count + 1))
+            
+            # 获取原标题
+            title=$(gh api "repos/$OWNER/$REPO/discussions/$num" --jq '.title' 2>/dev/null || echo "#$num")
+            echo "[$count/$total] 修复 #$num: ${title:0:60}"
+            
+            # 临时修改标题（触发 GitHub 重新索引）
+            gh api --method PATCH "repos/$OWNER/$REPO/discussions/$num" \
+              -f title="$title ⏳" --silent 2>/dev/null || true
+            
+            gh api --method PATCH "repos/$OWNER/$REPO/discussions/$num" \
+              -f title="$title" --silent 2>/dev/null || true
+            
+            # 每 10 个休息 3 秒，避免速率限制
+            if [ $((count % 10)) -eq 0 ]; then
+              echo "⏳ 休息 3 秒..."
+              sleep 3
+            fi
+          done <<< "$nums"
+          
+          echo ""
+          echo "🎉 全部完成！等待 2-5 分钟后刷新博客页面验证。"
