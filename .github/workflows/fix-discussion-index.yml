@@ -1,13 +1,13 @@
-name: 修复 Discussion 搜索索引
+name: 修复 Discussion 索引（评论触发版）
 
 on:
-  workflow_dispatch:  # 仅手动触发，不会自动跑
+  workflow_dispatch:
 
 jobs:
   fix-index:
     runs-on: ubuntu-latest
     steps:
-      - name: 批量触发 GitHub 重新索引
+      - name: 批量触发索引重建
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -16,7 +16,7 @@ jobs:
           
           echo "🔍 正在拉取所有 Open 状态的 Discussions..."
           
-          # 分页获取（每页 100，自动翻页）
+          # 手动分页获取（discussions API 的分页方式）
           page=1
           all_nums=""
           while true; do
@@ -35,24 +35,30 @@ jobs:
           count=0
           while read -r num; do
             count=$((count + 1))
+            echo "[$count/$total] 处理 Discussion #$num"
             
-            # 获取原标题
-            title=$(gh api "repos/$OWNER/$REPO/discussions/$num" --jq '.title' 2>/dev/null || echo "#$num")
-            echo "[$count/$total] 修复 #$num: ${title:0:60}"
+            # 1. 添加一条临时评论（触发索引）
+            comment_id=$(gh api --method POST "repos/$OWNER/$REPO/discussions/$num/comments" \
+              -f body="." \
+              --jq '.id' 2>/dev/null || echo "")
             
-            # 临时修改标题（触发 GitHub 重新索引）
-            gh api --method PATCH "repos/$OWNER/$REPO/discussions/$num" \
-              -f title="$title ⏳" --silent 2>/dev/null || true
+            if [ -n "$comment_id" ]; then
+              # 2. 立即删除该评论（清理现场）
+              gh api --method DELETE "repos/$OWNER/$REPO/discussions/comments/$comment_id" --silent 2>/dev/null || true
+              echo "  ✅ 已触发索引刷新"
+            else
+              echo "  ⚠️ 跳过（可能已修复或 API 受限）"
+            fi
             
-            gh api --method PATCH "repos/$OWNER/$REPO/discussions/$num" \
-              -f title="$title" --silent 2>/dev/null || true
-            
-            # 每 10 个休息 3 秒，避免速率限制
-            if [ $((count % 10)) -eq 0 ]; then
+            # 每 5 个休息 3 秒，避免速率限制
+            if [ $((count % 5)) -eq 0 ]; then
               echo "⏳ 休息 3 秒..."
               sleep 3
             fi
           done <<< "$nums"
           
           echo ""
-          echo "🎉 全部完成！等待 2-5 分钟后刷新博客页面验证。"
+          echo "🎉 全部处理完成！"
+          echo "⏰ 等待 3-5 分钟后，刷新博客页面验证。"
+          echo ""
+          echo "💡 如果仍有部分未恢复，等 10 分钟后再试（GitHub 索引是异步的）。"
